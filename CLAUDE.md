@@ -26,14 +26,26 @@
 
 ## 触ってよい / 触ってはいけない
 
+### 運用方針: 事前手動入金前提 (2026-04-15 確定)
+
+親プロジェクト側で**当日分を毎朝手動でテレボートに入金する**運用にする。
+理由:
+- 物理的な日次キャップ (入金額 = その日の最大損失額)
+- 銀行連携を auto run 中に通さない (連鎖事故防止)
+- `BRPOS_MAX_MONTHLY_INVEST` の上に追加の防御層
+- **fork 側の実装範囲を 1/3 に削減できる** (deposit/withdraw を作らなくて良い)
+
 ### 触ってよい (投票系)
 - `pyjpboatrace/const.py` — URL 定数
 - `pyjpboatrace/certification.py` — ログイン (130 行)
 - `pyjpboatrace/operator/better.py` — 投票 (181 行)
-- `pyjpboatrace/operator/static.py` — ログイン後のバランス取得
-- `pyjpboatrace/operator/depositor.py` — 入金 (76 行)
-- `pyjpboatrace/operator/withdrawer.py` — 出金 (81 行)
+- `pyjpboatrace/operator/static.py` — ログイン後の残高取得 (`get_bet_limit`)
 - 対応するテスト
+
+### 実装しない (事前入金前提のため不要)
+- `pyjpboatrace/operator/depositor.py` — 入金。手動でやる
+- `pyjpboatrace/operator/withdrawer.py` — 出金。手動でやる
+- これらの drift 修正は upstream に任せる (我々の運用には不要)
 
 ### 触ってはいけない (データ取得系 — 既に動いてる)
 - `pyjpboatrace/scraper/**` 全て
@@ -272,9 +284,11 @@ except Exception:
 - 実 Chrome + 実認証情報でのテストは **別 fixture** で用意 (通常の pytest から外す)
 - 最小確認: `get_bet_limit()` が数値を返す
 
-### Step D: 実投票 (最小額)
+### Step D: 実投票 (最小額、事前入金前提)
+- **テスト前に手動で 1,000 円 (1 単位) を入金** (Web ブラウザのテレボートサイトから)
 - **100 円 1 単位の trifecta** で 1 レースだけ投票
-- `deposit(1)` → `bet(..., {"trifecta": {"1-2-3": 100}})` → 結果確認 → `withdraw()` で残高回収
+- `bet(..., {"trifecta": {"1-2-3": 100}})` → 結果確認
+- `withdraw()` は使わない、残高 (900 円) はそのまま翌日のテストへ繰越 or 手動精算
 - 実投票は営業時間内 + 非ナイター場 (昼レース) を選ぶ (時間を焦らないため)
 
 ### Step E: upstream への貢献
@@ -314,7 +328,7 @@ uv run python -c "from pyjpboatrace import PyJPBoatrace; print(PyJPBoatrace.__mo
 | `brpos-predict monitor --auto-vote` with `BRPOS_DRY_RUN=false` | ❌ Step 6c 未実装で LIVE 投票不可 | ✅ 実投票可能に |
 | `PyjpboatraceAdapter.get_vote_history` | ⏸ Step 6c 保留中 | 実装する必要あり |
 | Discord `/voting_status` | ✅ 動作中 (空データ → 明日から dry-run データ) | 変わらず動く |
-| 入金テスト (`deposit(1)`) | ❌ 今夜発覚の drift で不可 | ✅ 可能に |
+| 入金 | ❌ 手動 (Web から) | **❌ 手動継続** (運用方針で自動化対象外) |
 
 ## セキュリティ (厳守)
 
