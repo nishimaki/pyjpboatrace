@@ -2,6 +2,145 @@
 
 メッセージは全て分かり易い日本語にする。
 
+---
+
+## 🔥 次回セッション開始時に最初に読むこと (2026-04-15 夜 申し送り)
+
+### 一行要約
+**`.jsp → .xhtml` の第1段階修正は完了**。`get_bet_limit()` と入金確認まで動いた。
+**Step D 初回実投票で 2 段目の drift (better.py:175 `id=pass` 欠落) を発見**、投票確定画面の DOM 調査が次の仕事。**残高 1,000 円は口座に保持済、追加入金不要**。
+
+### 今ここ (作業位置)
+- ブランチ: `fix/site-drift`
+- 最新 commit: `f72abe5 docs: record Step D 2nd drift (id=pass not found on betconf)`
+- 親プロジェクト (`~/aicode/boatrace`) は `pyproject.toml` の `[tool.uv.sources]` で本 fork を editable 参照済み。`uv sync` 済み
+- テレボート口座残高: **1,000 円 (手動入金済)** — そのまま Step D 再試行に使う
+- 親プロジェクトの Phase 0 dry-run (`brpos-predict monitor --auto-vote`) は独立して稼働中、本作業とは無関係に進む
+
+### 次にやること (順序厳守)
+
+#### 1. 未締切レースを 1 つ選ぶ
+昼 12〜16 時帯に下記で候補取得 (締切まで 15〜30 分あるものを選ぶ):
+```bash
+cd ~/aicode/boatrace
+uv run python -c "
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+from pyjpboatrace import PyJPBoatrace
+from brpos_fetch.constants import STADIUM_NAME_TO_ID
+now = datetime.now(ZoneInfo('Asia/Tokyo'))
+with PyJPBoatrace() as br:
+    stadiums = br.get_stadiums(date.today())
+for name, info in stadiums.items():
+    if not isinstance(info, dict): continue
+    vl = info.get('next_vote_limit')
+    if not vl: continue
+    dt = datetime.strptime(vl, '%Y-%m-%d %H:%M:%S').replace(tzinfo=ZoneInfo('Asia/Tokyo'))
+    m = (dt - now).total_seconds() / 60
+    if 15 <= m <= 40:
+        sid = STADIUM_NAME_TO_ID.get(name, '?')
+        print(f'{name}({sid}) R{info.get(\"next_race\")} 締切{vl[11:16]} 余裕{m:.0f}分')
+"
+```
+
+#### 2. 調査スクリプトを実行 (次セッションで書く)
+目的: `btnSubmit` クリック後の確認画面 DOM をダンプする。
+
+`/tmp/investigate_betconf.py`:
+```python
+import traceback
+from pyjpboatrace import PyJPBoatrace
+from pyjpboatrace.user_information import UserInformation
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from brpos_fetch.prediction.credentials import load_credentials_from_keychain
+
+STADIUM = XX  # ← 選んだ会場 ID
+RACE = YY    # ← 選んだレース番号
+
+creds = load_credentials_from_keychain()
+user = UserInformation(userid=creds.userid, pin=creds.pin,
+    auth_pass=creds.auth_pass, vote_pass=creds.vote_pass)
+driver = webdriver.Chrome()
+try:
+    with PyJPBoatrace(driver=driver, user_information=user) as br:
+        try:
+            br.bet(stadium=STADIUM, race=RACE,
+                   trifecta_betting_dict={'1-2-3': 100})
+            print('[UNEXPECTED] bet completed! balance:', br.get_bet_limit())
+        except Exception as e:
+            print(f'[EXPECTED FAIL] {type(e).__name__}: {e}')
+            print(f'URL:   {driver.current_url}')
+            print(f'TITLE: {driver.title}')
+            iframes = driver.find_elements(By.TAG_NAME, 'iframe')
+            print(f'iframes: {len(iframes)}')
+            for i, f in enumerate(iframes):
+                print(f'  [{i}] src={f.get_attribute("src")!r} name={f.get_attribute("name")!r}')
+            inputs = driver.find_elements(By.TAG_NAME, 'input')
+            print(f'inputs ({len(inputs)}):')
+            for inp in inputs[:30]:
+                print(f'  id={inp.get_attribute("id")!r} name={inp.get_attribute("name")!r} type={inp.get_attribute("type")!r}')
+            with open('/tmp/betconf_dom.html', 'w') as f:
+                f.write(driver.page_source)
+            print('[SAVED] /tmp/betconf_dom.html')
+            input('press enter to close browser...')
+finally:
+    pass
+```
+
+**注意**: `input()` で停止するので bash から直接叩くと hang する。ターミナルで手動実行するか、`timeout` 付きで実行。
+
+#### 3. DOM 分析
+```bash
+# pass 関連要素の検索
+grep -i -E "pass|password|暗証" /tmp/betconf_dom.html | head -20
+
+# 全 input 要素を抽出
+grep -i "<input" /tmp/betconf_dom.html | head -30
+```
+
+#### 4. better.py 最小修正
+仮説に応じて:
+- **タイミング問題**: line 174 の前に `WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, 'pass')))` を入れる
+- **iframe 問題**: `driver.switch_to.frame(driver.find_element(By.TAG_NAME, 'iframe'))` を 163 と 174 の間に入れる
+- **ID 変更**: `'pass'` を新 ID (`votePass`? `passWord`?) に書き換え
+
+#### 5. 再試行 (Step D 再挑戦)
+同じ要領で 100 円 1-2-3 を別レースで投票、残高が 900 円に減れば成功。
+
+### 知っておくべき背景
+
+- 今日の失敗は `better.py:175` で起きた。`line 174` の `amount` send_keys は例外を投げていないので、**少なくとも何らかの DOM は存在する** (同じ ID `amount` が旧画面にも確認画面にもある可能性あり、疑わしい)
+- `[BEFORE] balance = 1000 円` の後、別スクリプトで **1,000 円を再確認**。サーバー側にベットリストが確定残留していないことを確定済み
+- reCAPTCHA v3 (`6LcTx8of...`) は`btnSubmit` クリック後に token 注入される。reCAPTCHA がブロックして画面遷移が起きていない可能性もあるので、`driver.current_url` の確認が最初のチェック
+- CLAUDE.md 下部の「⚠️ Step D 初回試行で発覚した 2 段目の drift」セクションに詳細記録あり、今日の一連の出来事・仮説 4 つ・修正方針 3 案を全量記載
+
+### やってはいけないこと
+
+- **宮島 R6 での再試行** — 既に締切済み、別レースを選ぶ
+- **確認画面を飛ばすために better.py の冪等性ロジックを削る** — vote_pass 入力は唯一の最終確認ステップ、絶対に残す
+- **調査スクリプトで iframe を switch 後に戻し忘れる** — `switch_to.default_content()` で戻す
+- **複数レースに同時投票** — 最小 1 レース 1 投票で検証、切り分けできなくなる
+
+### 成功判定
+
+以下 3 つが全て満たされたら Step D クリア:
+1. `br.bet(...)` が例外なく `True` を返す
+2. 残高が 1,000 → 900 円に減少
+3. テレボート Web マイページで投票履歴に該当買い目が載る
+
+### 関連ファイル
+
+| ファイル | 役割 |
+|---|---|
+| `pyjpboatrace/operator/better.py:72-181` | 投票フロー全体、今回の drift 箇所 |
+| `pyjpboatrace/operator/static.py:58` | `currentBetLimitAmount` (get_bet_limit) |
+| `pyjpboatrace/const.py:13-19` | `IBMBRACEORJP` URL (第1段階修正済) |
+| `~/.claude/projects/-Users-tosnis-aicode-boatrace/memory/project_auto_voting.md` | 親プロジェクト側の記録 |
+| `~/aicode/boatrace/docs/design/auto_voting_design.md` §12.5 | 自動投票設計書 |
+
+---
+
 ## このリポジトリの目的
 
 `hmasdev/pyjpboatrace` の fork。**テレボート投票フローのサイト drift 追従**のみが目的。
