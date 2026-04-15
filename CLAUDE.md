@@ -4,7 +4,55 @@
 
 ---
 
-## 🔥 次回セッション開始時に最初に読むこと (2026-04-15 夜 申し送り)
+## 🔥 次回セッション開始時に最初に読むこと (2026-04-15 夜 第2版 申し送り)
+
+### 一行要約
+**drift 2 段目も解決、Step D 実投票成立済み** (若松R11 3連単 1-2-3 100円、残高 1,000 → 900 円、
+契約番号照会結果で目視確認済み)。次は親プロジェクト `~/aicode/boatrace` 側で
+`--auto-vote` 経由の end-to-end 確認、その後ユニットテスト追加と upstream PR。
+
+### 今ここ (作業位置)
+- ブランチ: `fix/site-drift`
+- 最新 commit: `d4b1c03 fix: btnSubmit セレクタを .inputCompletion にスコープ化して誤クリックを回避`
+- 残高: **900 円** (若松R11 100円ベット後、翌日以降のテスト資金として保持)
+- 未 push (必要に応じて `git push -u origin fix/site-drift`)
+
+### 第2段 drift の真因と修正
+- 場所: `pyjpboatrace/operator/better.py:163`
+- 真因: `find_element(By.CLASS_NAME, 'btnSubmit')` は DOM 内で複数マッチ
+  (暗証番号変更フォームの `<li class="btn btnSubmit">` 3 つ + 投票入力完了の
+  `<div class="btnSubmit ">` 1 つ) のうち、**隠し要素を先に掴んでいた**。
+  誤クリックで画面遷移せず、その後の `id=pass` が NoSuchElement。
+- 症状は「タイミング問題/iframe/ID変更/reCAPTCHA」に見えたが、**全部外れ**。
+  実態は単なる CSS セレクタ曖昧性。
+- 修正 (2 箇所):
+  1. `By.CLASS_NAME, 'btnSubmit'` → `By.CSS_SELECTOR, '.inputCompletion .btnSubmit a'`
+  2. confirmation 前に `WebDriverWait(..., EC.presence_of_element_located((By.ID, 'pass')))`
+- betconf 画面の `id=amount` / `id=pass` / `id=submitBet` / `id=ok` は事前調査通り
+  存在し、better.py 174-177 行は**無修正で動いた**。
+
+### 次のセッションでやること (順序は相談可)
+
+1. **親プロジェクト側 end-to-end 確認** (ユーザーが本体で実施予定)
+   - `~/aicode/boatrace` 側で fork の変更を反映 (既に editable 参照済み)
+   - `brpos-predict monitor --auto-vote` の dry-run / LIVE 動作確認
+2. **ユニットテスト追加** — `tests/` 配下に better.py の新セレクタを mock で検証
+3. **upstream Issue + PR** — 2 段 drift (`.xhtml` + btnSubmit スコープ) を併記
+4. **親プロジェクト Step 6c** — `PyjpboatraceAdapter.get_vote_history` の Selenium 実装
+
+### やってはいけないこと
+- **残高 900 円を勝手に精算しない** — 翌日の再検証用
+- **better.py の他の箇所をリファクタしない** — 最小差分ルール
+- **upstream PR に個人情報混入** — ログ・トレースバック全マスク
+
+### 過去の申し送り
+以下の「⚠️ Step D 初回試行で発覚した 2 段目の drift」セクションは履歴として残すが、
+**既に解決済み**。今日の調査で仮説 4 つ (タイミング/iframe/ID変更/btnSubmit無効) は
+どれも真因ではなく、正解は「CLASS_NAME セレクタの曖昧性」だったことが判明。
+
+---
+
+## 旧・申し送り (2026-04-15 昼 時点、解決済みにつき履歴のみ)
 
 ### 一行要約
 **`.jsp → .xhtml` の第1段階修正は完了**。`get_bet_limit()` と入金確認まで動いた。
