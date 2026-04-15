@@ -24,6 +24,182 @@
 3. `const.py:13-19` の `IBMBRACEORJP = owpc/VoteBridgeNew.jsp?param=H0JS00000stContens&kbn=1&voteActionUrl=...` が古い PC 版フロー前提で、現行のテレボート SP 版に届かない疑い
 4. 手動ブラウザログイン (`im.mbrace.or.jp` 経由) は成功する → 認証情報は正しい、ログインフローだけが壊れている
 
+## ✅ drift 解決状況 (2026-04-15 夜 時点)
+
+### 結論
+**`.jsp` → `.xhtml` の 1 文字修正だけで drift は解決**。コミット `a0ebb27` on `fix/site-drift`。
+
+```diff
+- 'owpc/VoteBridgeNew.jsp?',
++ 'owpc/VoteBridgeNew.xhtml?',
+```
+
+サイトが JSF (`javax.faces.ViewState` が login form にある) に移行した際に `.jsp` → `.xhtml` へリネームされただけで、param (`H0JS00000stContens&kbn=1&voteActionUrl=/owpc/pc/site/index.html`) は完全に同一。
+
+### 実機検証で確認できたこと (2026-04-15)
+
+1. **`get_bet_limit()` 実サイトで数値取得成功** (残高 `0` 円、関数は正常に int を返す)
+2. **ログインフォーム (`certification.py`)** — `in_KanyusyaNo` / `in_AnsyoNo` / `in_PassWord` / `button.btn.is-type3_2` すべて**無修正で動く**
+3. **投票フロー全 DOM が現状コードと完全整合** — DevTools で確認済:
+   - `currentBetLimitAmount` (`static.py:58`) ✅
+   - `jyo{NN}` / `borderNone` 判定 (`better.py:105-110`) ✅
+   - `selRaceNo{NN}` (`better.py:115`) ✅ (締切済みの `.end` class は未検証、`.raceSelTab end` になる想定)
+   - `betkati{1-7}` (`better.py:144`) ✅
+   - `regbtn_{boat}_{idx}` (`better.py:154`) ✅
+   - `amount` input (`better.py:156-157`、maxlength=10 で `\b*10` がぴったり) ✅
+   - `regAmountBtn` (`better.py:158`) ✅
+   - `btnSubmit` (`better.py:163`) ✅
+   - **投票確認画面** (`/service/bet/betconf`): `amount` / `pass` / `submitBet` すべて ID 一致 ✅
+   - `ok` ボタン — 投票成立直前のポップアップ (`error_pop` テンプレの ATTENTION_OK) に存在、JS 動的生成 ✅
+
+### 投票アプリの正体
+ログイン後は `https://ib.mbrace.or.jp/tohyo-ap-pctohyo-web/` (JSF + jsrender SPA)。`BOAT.global`, `BOAT.attribute`, `BOAT.code` というグローバル namespace、`methodpanel_controller.js` / `betcom_controller.js` 系がコントロール。
+場クリック → レース選択が ajax でレンダー、レース選択 → 式別 → 艇番 → 金額入力 → ベットリスト追加 → 投票入力完了 → `/service/bet/betconf` に POST → 確認画面 → `submitBet` クリック → reCAPTCHA token 自動注入 → `/service/bet/betcomp` に POST → ポップアップ → `#ok` クリック → 成立。
+
+### 未検証項目 (Step D 実投票で確認すること)
+1. **reCAPTCHA v3 (`6LcTx8of...`) が Selenium で透過的に通るか** — 非 headless + デフォルト UA なら高確率で通る想定。`rctoken` hidden field に自動 token 注入。
+2. **`#ok` ポップアップの挙動** — error_pop テンプレ的にはほぼ確実に動くが実行未確認。
+3. **100 円 1 単位での実投票成立** (Step D)。
+4. **締切済みレースの `.end` class** (`better.py:117`) — 桐生 1R は未締切だったため未確認。
+
+## ⚠️ Step D 初回試行で発覚した 2 段目の drift (2026-04-15 12:43)
+
+親プロジェクトから `br.bet(stadium=17, race=6, trifecta_betting_dict={'1-2-3':100})` を実行した結果:
+
+```
+[BEFORE] balance = 1000 円
+trifecta 1-2-3 100
+Traceback (most recent call last):
+  ...
+  File "pyjpboatrace/operator/better.py", line 175, in __bet
+    self._driver.find_element(By.ID, 'pass').send_keys(self._user.vote_pass)
+selenium.common.exceptions.NoSuchElementException:
+    no such element: Unable to locate element: {"method":"css selector","selector":"[id=\"pass\"]"}
+```
+
+### 進行状況
+better.py の投票フロー上、**以下までは通過**した (推定):
+- login ✅
+- `jyo17` 宮島クリック ✅
+- `selRaceNo06` R6 クリック ✅
+- `betkati1` trifecta タブ ✅
+- `regbtn_1_1`, `regbtn_2_2`, `regbtn_3_3` 艇番 ✅
+- `amount` 入力 ✅
+- `regAmountBtn` ベットリスト追加 ✅
+- **`btnSubmit` → 確認画面遷移 ✅**
+- line 174 `find_element(By.ID, 'amount').send_keys(str(amount))` ✅ (例外なし)
+- **line 175 `find_element(By.ID, 'pass')` ❌ NoSuchElementException**
+
+### 残高は変動なし
+`[BEFORE] balance = 1000 円` → 別スクリプトで再確認して **1,000 円のまま**。vote_pass 入力前に落ちたので、サーバー側のベットリストは確認なしで破棄 (冪等に安全)。
+
+### 仮説
+
+1. **タイミング問題 (最有力)** — line 163 `btnSubmit.click()` 後、確認画面の DOM が完全にロードされる前に line 174-175 の `find_element` が走った。CLAUDE.md の DevTools 確認は人間速度での読み込み後に見ていたため、Selenium の速いナビゲーションでは間に合わない
+2. **iframe** — 確認画面 (`/service/bet/betconf`) が iframe にラップされていて top frame から `id=pass` が見えない
+3. **ID 変更** — `pass` → 別名にリネームされた
+4. **line 174 の `amount` は旧画面の要素を拾っている** — btnSubmit のクリックがそもそも遷移していないケース (line 174 が成功したのは旧画面の `amount` と同名の要素を取ったため)。これだと「btnSubmit が効いていない」= reCAPTCHA 絡みの可能性
+
+### 次回調査手順 (fork セッションで実施)
+
+1. **再現環境で Chrome を開いたまま停止させる調査スクリプトを書く**:
+   ```python
+   # 宮島 R6 は締切済みのはずなので別の未締切レースを選ぶ
+   import time
+   from pyjpboatrace import PyJPBoatrace
+   from pyjpboatrace.user_information import UserInformation
+   from selenium import webdriver
+   from brpos_fetch.prediction.credentials import load_credentials_from_keychain
+   from selenium.webdriver.common.by import By
+
+   creds = load_credentials_from_keychain()
+   user = UserInformation(**{k: getattr(creds, k) for k in ['userid','pin','auth_pass','vote_pass']})
+   driver = webdriver.Chrome()
+   try:
+       with PyJPBoatrace(driver=driver, user_information=user) as br:
+           try:
+               br.bet(stadium=XX, race=Y, trifecta_betting_dict={'1-2-3': 100})
+           except Exception as e:
+               print(f'[ERROR at bet] {type(e).__name__}: {e}')
+               print(f'URL: {driver.current_url}')
+               print(f'title: {driver.title}')
+               # iframe 一覧
+               iframes = driver.find_elements(By.TAG_NAME, 'iframe')
+               print(f'iframes: {len(iframes)}')
+               for i, f in enumerate(iframes):
+                   print(f'  [{i}] {f.get_attribute("src") or f.get_attribute("name")}')
+               # 全 input 一覧
+               inputs = driver.find_elements(By.TAG_NAME, 'input')
+               print(f'inputs ({len(inputs)}):')
+               for inp in inputs[:20]:
+                   print(f'  id={inp.get_attribute("id")!r} name={inp.get_attribute("name")!r} type={inp.get_attribute("type")!r}')
+               # DOM ダンプ
+               with open('/tmp/betconf_dom.html', 'w') as f:
+                   f.write(driver.page_source)
+               print('DOM saved to /tmp/betconf_dom.html')
+               input('press enter to close...')
+   finally:
+       pass
+   ```
+2. **/tmp/betconf_dom.html を grep** して `pass` 関連の要素を探す:
+   ```bash
+   grep -i "pass\|password\|vote" /tmp/betconf_dom.html | head -20
+   ```
+3. **iframe があれば `driver.switch_to.frame()` を呼ぶ必要あり** — better.py の 174-177 の前に追加
+4. **タイミング問題なら `WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, 'pass')))` で解決**
+
+### 修正方針候補
+
+| 案 | 変更量 | リスク |
+|---|---|---|
+| A. line 174-177 の前に WebDriverWait を入れる | 3-5 行 | 低 |
+| B. iframe switch を追加 | 5-10 行 | 中 |
+| C. `pass` の新 ID に書き換え | 1 行 | サイトが戻ると壊れる |
+
+A + C の組合せが安全策。
+
+### 次回作業の順序
+1. 調査スクリプトで DOM を保存 (未締切の任意レースで 1 回実行)
+2. `/tmp/betconf_dom.html` を確認して真因特定
+3. better.py 最小修正
+4. 別日・別レースで Step D 再試行 (残高 1,000 円そのまま使える)
+
+### 親プロジェクトからの確認手順 (再現スクリプト)
+
+`uv pip install -e ~/aicode/pyjpboatrace` は PEP 660 非対応で editable install が効かず site-packages にコピーされる。検証時は以下のどちらか:
+
+**方法 A** (今夜使った手っ取り早い手段):
+```bash
+cp ~/aicode/pyjpboatrace/pyjpboatrace/const.py \
+   ~/aicode/boatrace/.venv/lib/python3.11/site-packages/pyjpboatrace/const.py
+```
+(const.py 1 ファイルだけなので cp で十分)
+
+**方法 B** (正攻法): 親プロジェクトの `pyproject.toml` の `[tool.uv.sources]` に `pyjpboatrace = { path = "/Users/tosnis/aicode/pyjpboatrace", editable = true }` を入れて `uv sync`。
+
+再現スクリプト `/tmp/check_drift.py`:
+```python
+import traceback
+from pyjpboatrace import PyJPBoatrace
+from pyjpboatrace.user_information import UserInformation
+from pyjpboatrace.const import IBMBRACEORJP
+from selenium import webdriver
+from brpos_fetch.prediction.credentials import load_credentials_from_keychain
+
+print('IBMBRACEORJP =', IBMBRACEORJP)  # .xhtml が入ってるか確認
+creds = load_credentials_from_keychain()
+user = UserInformation(userid=creds.userid, pin=creds.pin,
+    auth_pass=creds.auth_pass, vote_pass=creds.vote_pass)
+driver = webdriver.Chrome()
+try:
+    with PyJPBoatrace(driver=driver, user_information=user) as br:
+        print('balance:', br.get_bet_limit())
+except Exception:
+    traceback.print_exc()
+    input('press enter to close...')
+```
+期待出力: `IBMBRACEORJP = https://www.boatrace.jp/owpc/VoteBridgeNew.xhtml?...` → `balance: 0`
+
 ## 触ってよい / 触ってはいけない
 
 ### 運用方針: 事前手動入金前提 (2026-04-15 確定)
